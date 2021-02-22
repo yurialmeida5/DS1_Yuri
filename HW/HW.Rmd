@@ -1,0 +1,702 @@
+---
+title: "Homework Assignment"
+author: "Yuri Almeida Cunha"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r include=FALSE}
+
+# Clear environment
+rm(list = ls())
+
+# Library 
+
+library(tidyverse)
+library(datasets)
+library(MASS)
+library(ISLR)
+library(caret)
+library(ggplot2)
+library(mctest)
+library(ppcor)
+library(gridExtra)
+library(grid)
+library(lattice)
+library(pander)
+library(skimr)
+library(GGally)
+# Load the necessary data
+
+data <- readRDS(url('http://www.jaredlander.com/data/manhattan_Train.rds')) %>%
+  mutate(logTotalValue = log(TotalValue)) %>%
+  drop_na()
+
+# Remove ID Column (Shouldn't be used in the Regression models)
+data$ID <- NULL
+
+
+
+```
+
+
+# 1. Supervised learning with penalized models and PCA
+
+## Do a short exploration of data and find possible predictors of the target variable.
+
+```{r include=FALSE}
+skim(data)
+
+# 6 factor variable types, 1 Boolean and another 29 numeric variables. 
+# Non-missing values under the following variables, this is really good (specially for predictions and regressions).
+
+# Predicted variable: Total Value
+# Check variable distribution 
+
+graphTotalValue <- ggplot(data, aes(TotalValue)) +
+  geom_histogram(alpha = 0.8) +
+  ylab("count") +
+  xlab("TotalValue") +
+  theme_classic()
+
+# Right Tailed Skewed Distribution with a considerable amount of outliers
+
+graphLogTotalValue <- ggplot(data, aes(logTotalValue)) +
+  geom_histogram(alpha = 0.8) +
+  ylab("count") +
+  xlab("ln(TotalValue)") +
+  theme_classic()
+
+# Way closer to the normal distribution, the log transformation promotes a better fit for the regression.
+
+# Remove all the non-used variables used in the regression 
+explanatory_var <- colnames(data)[
+  which(!(colnames(data) %in% c("ID","TotalValue", "logTotalValue")))]
+
+# Check the general linear regression results
+outcome_name <- "logTotalValue"
+formula_str <- paste(outcome_name, "~", paste(explanatory_var, collapse = " + "))
+
+gen_model <- lm(formula_str, data = data)
+
+# General Model Diagnostic 
+#par(mfrow=c(2,2))
+#plot(gen_model)
+
+# Residuals vs Fitted / Scale - Location: Variance is more-less constant, but the graphs indicates the presence of outliers
+# Normal Q-Q:  tails are observed to be ‘heavier’ (have larger values)
+
+# Multicolinearity Check
+ggcorr(data)
+
+omc_res <- omcdiag(gen_model)
+# Really low Determinant |X'X| and high Farrar Chi-Squared, high possibility of multicollinearity. 
+
+```
+
+Data Description: 31746 observations within 6 factor variable types, 1 Boolean, 29 numeric variables. There is no-missing values under the following variables, this is really good specially for predictions and regressions.
+
+Dependent Variable (TotalValue): Right Tailed Skewed Distribution with a considerable amount of outliers. Log transformation makes it closer to normal distribution, better fit for regression. Graph bellow:
+
+```{r echo=FALSE , comment= FALSE , warning=FALSE , message=FALSE}
+
+graphTotalValue 
+graphLogTotalValue
+
+```
+
+Explanatory Variables: Not too much background information about the data, most of the dimensions seem to be important for to the regression based on a general regression involving all possible explanatory variables. 
+As we are going to run models to penalize and reduce their complexity, I decided to initially check whether there is or not a possible multicolinearity problem between those explanatory variables. 
+
+It was applied the Farrar – Glauber Test. The results can be seen on the table bellow:
+
+```{r echo=FALSE}
+
+pander(omc_res$odiags)
+
+```
+
+Really low Determinant |X'X| and high Farrar Chi-Squared demonstrates a higher possibility of multicollinearity.
+
+## Create a training and a test set, assigning 30% of observations to the training set.
+
+```{r echo=TRUE}
+
+set.seed(1234)
+training_ratio <- 0.3
+train_indices <- createDataPartition(
+  y = data[["logTotalValue"]],
+  times = 1,
+  p = training_ratio,
+  list = FALSE
+) %>% as.vector()
+data_train <- data[train_indices, ]
+data_test <- data[-train_indices, ]
+
+
+```
+
+## Use a linear regression to predict logTotalValue and use 10-fold cross validation to assess the predictive power.
+
+```{r echo=TRUE, warning=FALSE, comment=FALSE, message=FALSE}
+
+# OLS
+
+set.seed(1234)
+linear_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "lm",
+  preProcess = c("center", "scale"),
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+
+```
+
+## Use penalized linear models for the same task. Make sure to try LASSO, Ridge and Elastic Net models. Does the best model improve on the simple linear model?
+
+```{r include=FALSE}
+
+# In statistics, there are two critical characteristics of estimators to be considered: the bias and the variance. 
+# The bias is the difference between the true population parameter and the expected estimator
+# Variance, on the other hand, measures the spread, or uncertainty, in these estimates.
+
+# The OLS estimator has the desired property of being unbiased. 
+# However, it can have a huge variance. Specifically, this happens when:
+  
+# The predictor variables are highly correlated with each other (Multicolinearity)
+# There are many predictors. This is reflected in the formula for variance given above: if m approaches n, the variance approaches infinity.
+
+
+# LASSO Model
+tenpowers <- 10^seq(-1, -5, by = -1)
+
+lasso_tune_grid <- expand.grid(
+  "alpha" = c(1),
+  "lambda" = c(tenpowers, tenpowers / 2) 
+)
+
+set.seed(1234)
+lasso_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = lasso_tune_grid,
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+# Lasso regression is a type of linear regression that uses shrinkage (where data values are shrunk towards a central point)  
+# Well-suited for models showing high levels of muticollinearity (variable selection/parameter elimination).
+# Coefficients are forced to be zero.
+
+# Ridge model
+ridge_tune_grid <- expand.grid(
+  "alpha" = c(0),
+  "lambda" = seq(0.05, 0.5, by = 0.025)
+)
+
+set.seed(1234)
+ridge_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = ridge_tune_grid,
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+# Penalize the variables if they are too far from zero, thus enforcing them to be small in a continuous way
+# Decreases model complexity while keeping all variables in the model. 
+# Assumed that the predictors are standardized and the response is centered.
+
+# Elastic Net Model
+
+enet_tune_grid <- expand.grid(
+  "alpha" = seq(0, 1, by = 0.1),
+  "lambda" = union(lasso_tune_grid[["lambda"]], ridge_tune_grid[["lambda"]])
+)
+
+set.seed(1234)
+enet_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = enet_tune_grid,
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+# Combine the penalties of ridge regression and lasso to get the best of both.
+
+# Evaluate the models
+
+linear_fit_RMSE <- summary(linear_fit$resample$RMSE)
+ridge_fit_RMSE <- summary(ridge_fit$resample$RMSE)
+lasso_fit_RMSE <- summary(lasso_fit$resample$RMSE)
+enet_fit_RMSE <- summary(enet_fit$resample$RMSE)
+
+linear_fit_Rsquared <-  summary(linear_fit$resample$Rsquared)
+ridge_fit_Rsquared <-  summary(ridge_fit$resample$Rsquared)
+lasso_fit_Rsquared <- summary(lasso_fit$resample$Rsquared)
+enet_fit_Rsquared <- summary(enet_fit$resample$Rsquared)
+
+results_lm_RMSE <- rbind(linear_fit_RMSE, ridge_fit_RMSE, lasso_fit_RMSE, enet_fit_RMSE)
+results_lm_Rsquared <- rbind(linear_fit_Rsquared, ridge_fit_Rsquared, lasso_fit_Rsquared, enet_fit_Rsquared)
+
+
+```
+
+```{r}
+
+pander(results_lm_RMSE)
+pander(results_lm_Rsquared)
+
+```
+
+Yes, as expected the all the models lowered the RMSE without reducing much the R2 Squared value, confirming some multicollinearities found on the general (linear model). Although you may see a slightly better performance (smaller RMSE values) under the elastic net model, LASSO and Ridge also showed closer results.
+
+## Which of the models you’ve trained is the “simplest one that is still good enough”?  What is its effect?
+
+```{r include=FALSE}
+
+# "one standard error"  suggest that the tuning parameter associated with the best performance may over fit. 
+# They suggest that the simplest model within one standard error of the empirically optimal model is the better choice. 
+# This assumes that the models can be easily ordered from simplest to most complex.
+
+
+set.seed(1234)
+lasso_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = lasso_tune_grid,
+  trControl = trainControl(method = "cv", number = 10, selectionFunction = "oneSE")
+)
+
+set.seed(1234)
+ridge_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = ridge_tune_grid,
+  trControl = trainControl(method = "cv", number = 10, selectionFunction = "oneSE")
+)
+
+set.seed(1234)
+enet_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = enet_tune_grid,
+  trControl = trainControl(method = "cv", number = 10, selectionFunction = "oneSE")
+)
+
+linear_fit_RMSE <- summary(linear_fit$resample$RMSE)
+ridge_fit_RMSE <- summary(ridge_fit$resample$RMSE)
+lasso_fit_RMSE <- summary(lasso_fit$resample$RMSE)
+enet_fit_RMSE <- summary(enet_fit$resample$RMSE)
+
+linear_fit_Rsquared <-  summary(linear_fit$resample$Rsquared)
+ridge_fit_Rsquared <-  summary(ridge_fit$resample$Rsquared)
+lasso_fit_Rsquared <- summary(lasso_fit$resample$Rsquared)
+enet_fit_Rsquared <- summary(enet_fit$resample$Rsquared)
+
+results_lm_RMSE_2 <- rbind(linear_fit_RMSE, ridge_fit_RMSE, lasso_fit_RMSE, enet_fit_RMSE)
+results_lm_Rsquared_2 <- rbind(linear_fit_Rsquared, ridge_fit_Rsquared, lasso_fit_Rsquared, enet_fit_Rsquared)
+
+```
+
+```{r}
+
+pander(results_lm_RMSE_2)
+pander(results_lm_Rsquared_2)
+
+```
+
+Adding the one Standard Error Selection Function, the results didn't show much difference from the past analysis (slightly worse in terms of RMSE indeed). Ridge,Lasso, and Elastic Net also lowered the RMSE presented in comparison the linear model, reducing the multicollinearity between variables.Although the results are similar, in this case, Ridge and Elastic showed to be the best models.
+with a preference for Ridge, in this case, for being the easier to explain.
+
+## Does PCA improve the fit over the simple linear model?
+
+```{r include=FALSE}
+# PCR can aptly deal with such situations by excluding some of the low-variance principal components in the regression step. 
+# In addition, by usually regressing on only a subset of all the principal components, PCR can result in dimension reduction through substantially lowering the effective number of parameters characterizing the underlying model. 
+# This can be particularly useful in settings with high-dimensional covariates.
+
+# Center and scale your variables and use pcr to conduct a search for the optimal number of principal components. 
+
+tune_grid <- data.frame(ncomp = 1:118)
+set.seed(1234)
+pcr_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data,
+  method = "pcr",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneGrid = tune_grid,
+  preProcess = c("center", "scale")
+)
+
+set.seed(1234)
+linear_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "lm",
+  preProcess = c("center", "scale"),
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+set.seed(1234)
+lasso_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = lasso_tune_grid,
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+set.seed(1234)
+ridge_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = ridge_tune_grid,
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+set.seed(1234)
+enet_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = enet_tune_grid,
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+linear_fit_RMSE <- summary(linear_fit$resample$RMSE)
+ridge_fit_RMSE <- summary(ridge_fit$resample$RMSE)
+lasso_fit_RMSE <- summary(lasso_fit$resample$RMSE)
+enet_fit_RMSE <- summary(enet_fit$resample$RMSE)
+pcr_fit_RMSE <- summary(pcr_fit$resample$RMSE)
+
+linear_fit_Rsquared <-  summary(linear_fit$resample$Rsquared)
+ridge_fit_Rsquared <-  summary(ridge_fit$resample$Rsquared)
+lasso_fit_Rsquared <- summary(lasso_fit$resample$Rsquared)
+enet_fit_Rsquared <- summary(enet_fit$resample$Rsquared)
+pcr_fit_Rsquared <- summary(pcr_fit$resample$Rsquared)
+
+results_lm_RMSE_3 <- rbind(linear_fit_RMSE, ridge_fit_RMSE, lasso_fit_RMSE, enet_fit_RMSE, pcr_fit_RMSE)
+results_lm_Rsquared_3 <- rbind(linear_fit_Rsquared, ridge_fit_Rsquared, lasso_fit_Rsquared, enet_fit_Rsquared, pcr_fit_Rsquared)
+
+```
+
+
+```{r}
+
+pander(results_lm_RMSE_3)
+pander(results_lm_Rsquared_3)
+
+```
+
+Yes, by excluding some of the low-variance principal components in the regression step,
+the PCR method not only impressively improved the fit (R-Squared), but also reduced the RMSE comparing to the rest of the models.
+In addition, by usually regressing on only a subset of all the principal components, PCR can result in dimension reduction through substantially lowering the effective number of non-useful parameters characterizing the underlying model. 
+This can be particularly useful in settings with high-dimensional covariates, like in that case.
+
+
+## If you apply PCA prior to estimating penalized models via preProcess, does it help to achieve a better fit?
+
+```{r include=FALSE}
+
+# The preProcess function estimates whatever it requires (in terms of parameters) from a specific data set (e.g. the training set)
+# and then applies these transformations to any data set without recomputing the values
+
+set.seed(1234)
+linear_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "lm",
+  preProcess = c("center", "scale", "pca" , "nzv"),
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+set.seed(1234)
+lasso_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale", "pca" , "nzv"),
+  tuneGrid = lasso_tune_grid,
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+set.seed(1234)
+ridge_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale", "pca" , "nzv"),
+  tuneGrid = ridge_tune_grid,
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+set.seed(1234)
+enet_fit <- train(
+  logTotalValue ~ . -TotalValue,
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale", "pca", "nzv"),
+  tuneGrid = enet_tune_grid,
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+
+
+linear_fit_RMSE <- summary(linear_fit$resample$RMSE)
+ridge_fit_RMSE <- summary(ridge_fit$resample$RMSE)
+lasso_fit_RMSE <- summary(lasso_fit$resample$RMSE)
+enet_fit_RMSE <- summary(enet_fit$resample$RMSE)
+pcr_fit_RMSE <- summary(pcr_fit$resample$RMSE)
+
+linear_fit_Rsquared <-  summary(linear_fit$resample$Rsquared)
+ridge_fit_Rsquared <-  summary(ridge_fit$resample$Rsquared)
+lasso_fit_Rsquared <- summary(lasso_fit$resample$Rsquared)
+enet_fit_Rsquared <- summary(enet_fit$resample$Rsquared)
+pcr_fit_Rsquared <- summary(pcr_fit$resample$Rsquared)
+
+results_lm_RMSE_final <- rbind(linear_fit_RMSE, ridge_fit_RMSE, lasso_fit_RMSE, enet_fit_RMSE, pcr_fit_RMSE)
+results_lm_Rsquared_final <- rbind(linear_fit_Rsquared, ridge_fit_Rsquared, lasso_fit_Rsquared, enet_fit_Rsquared, pcr_fit_Rsquared)
+
+
+```
+
+```{r echo=FALSE}
+
+pander(results_lm_RMSE_final)
+pander(results_lm_Rsquared_final)
+
+```
+
+Yes, it's possible to actually visualize a reduction on RMSE in all models (Linear, LASSO, Ridge and Elastic).
+Intuitively, it's possible to say that this reduction was already expected. Using "PCA" (retrieving only the main coefficients that explain 95% of the variance) and "nvz" (excluding "near-zero-variance predictors), there is already a reduction the number of coefficients to be penalized by the models, lowering the RMSE in all cases.
+However, using the "pcr" method directly, it was obtained the best model with the smallest errors (RMSE) and best fit (higher R-Squared).
+
+## Select the best model of those you’ve trained. Evaluate your preferred model on the test set.
+
+```{r echo=FALSE}
+
+predicted_val <- predict(pcr_fit , newdata = data_test , "raw")
+data_test$predicted_vals <- predicted_val
+pcr_RMSE_test <- RMSE(data_test$predicted_vals, data_test$logTotalValue)
+
+data_test %>%
+  ggplot() +
+  geom_point(aes(x = predicted_vals, y = logTotalValue)) +
+  geom_line( aes( x = logTotalValue , y = logTotalValue ) , color = "red", size = 1.2) +
+  labs( x = "Predicted values", y = "Actual values")
+
+```
+
+The predictions for the model showed a really great fit. Based on the graph it's possible to check the errors mostly follow regular pattern,their deviation from the actual values remain mostly stable during the whole set of values. The RMSE distribution is closer to normal, with some heavy tails due to outliers.
+
+# Clustering on the USArrests dataset
+
+```{r include=FALSE}
+# Load necessary packages
+
+# Clear environment
+rm(list = ls())
+
+library(tidyverse)
+library(caret)
+library(skimr)
+library(janitor)
+library(factoextra)
+library(NbClust)
+library(ISLR)
+library(data.table)
+library(ggplot2)
+library(plyr)
+library(psych)
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(lattice)
+
+# Load data
+
+data <- USArrests 
+skim(data)
+
+```
+
+## Think about any data pre-processing steps you may/should want to do before applying clustering methods. Are there any?
+
+1) Data has only numeric values and few number of dimensions, because K-means use distance measures to determine similarities
+
+```{r echo=FALSE}
+
+pander(sapply(data, class))
+
+```
+
+The data set has only numeric values and only four variables. 
+
+2) Noises or outliers: K-means is sensitive to outliers. (Symmetric Distributions).
+
+```{r echo=FALSE}
+multi.hist(data[,sapply(data, is.numeric)])
+```
+
+Although it's possible to visualize some outliers in the variables distribution (Rape) and some skewness, due to the lower amount of observations, no transformation or exclusion will be done.
+
+3) Variables on the same scale. Scaling will be done on the prcomp (scale = true)
+
+4) No multicollinearity between the variables: 
+
+```{r echo=FALSE, message=FALSE}
+
+# Multicolinearity Check
+
+ggpairs(data)
+
+```
+
+Despite the fact that murder and assault showed a quite expressive correlation value - 0.8, due to the reduced amount of variables and that the value is still lower than 0.9.(what could be considered a really problematic colinearity). 
+
+## Determine the optimal number of clusters as indicated by NbClust heuristics.
+
+```{r include=FALSE}
+
+nb <- NbClust(data, method = "kmeans",
+              min.nc = 2, max.nc = 48, index = "all")
+
+```
+
+Considering the amount of observations (50), the maximum number of clusters should be set to 48. 
+Any other higher number of observations wouldn't be possible to run (n-2). 
+The best number of clusters based on the Hurbet Index is 2. 
+
+## Plot observations colored by clusters in the space of urban population and another (crime-related) variable.
+
+```{r echo=FALSE}
+# KM Clusters
+km <- kmeans(data, centers = 2)
+
+# Creating a column with a clusters
+data_w_clusters <- cbind(data,
+                         data.table("cluster" = factor(km$cluster)))
+
+# Graph UrbanPop vs Assaults
+ggplot(data_w_clusters,
+       aes(x = UrbanPop, y = Assault, color = cluster)) +
+  geom_point()
+
+# Graph UrbanPop vs Rape
+ggplot(data_w_clusters,
+       aes(x = UrbanPop, y = Rape, color = cluster)) +
+geom_point()
+
+```
+
+## Perform PCA and Plot clusters of your choice from the previous points in the coordinate system defined by the first two principal components. How do clusters relate to these?
+
+```{r echo=FALSE}
+pca_result <- prcomp(data, scale = TRUE)
+first_two_pc <- as_tibble(pca_result$x[, 1:2])
+data_w_pca <- cbind(data_w_clusters, first_two_pc)
+PCs <- data_w_pca %>%
+     ggplot(aes(x = PC1, y = PC2, fill = cluster, color = cluster)) +
+     geom_point()
+
+Variance <- pca_result$sdev^2
+percentage_variance <- Variance / sum(Variance)
+
+
+# Cumulative PVE plot
+PVE <- qplot(c(1:4), cumsum(percentage_variance)) + 
+  geom_line() + 
+  xlab("Principal Component") + 
+  ylab(NULL) + 
+  ggtitle("Cumulative Scree Plot") +
+  ylim(0,1)
+
+PCs
+PVE
+
+```
+
+Taking a closer look under the PCs composition, it's clear to assume that the PC1 is related to the variables Murder, Rape and Assault. On the other hand, the PC2 is roughly explained by the Urbanization one. The PC1 x PC2 graph shows the distribution of the dots based on those characteristics. Cities far more right in the graph showed those crimes variables with higher values and cities on the top, higher population. The optimal clustering separated the dataset into two groups and the distribution of the dots and his colors are impacted mostly by the variance explained by those 2 PC components.
+The cumulative scree plot on the right demonstrates how much it is explained by each PC, PC1 (62%) and PC2 (24%).
+
+# PCA of high-dimensional data (optional, for extra 5 points)
+
+```{r include=FALSE}
+# Load necessary packages
+
+# Clear environment
+rm(list = ls())
+
+library(tidyverse)
+library(caret)
+library(skimr)
+library(janitor)
+library(factoextra)
+library(NbClust)
+library(ISLR)
+library(data.table)
+library(ggplot2)
+library(plyr)
+library(psych)
+
+
+# Load datasets
+
+genes <- read_csv("https://www.statlearning.com/s/Ch10Ex11.csv", col_names = FALSE) %>%
+  t() %>% as_tibble()  # the original dataset is of dimension 1000x40 so we transpose it
+dim(data)
+
+```
+
+## PCA on this data with scaling features
+
+```{r}
+pca_result <- prcomp(genes, scale = TRUE)
+```
+
+## Visualize data points in the space of the first two principal components (look at the fviz_pca_ind function). What do you see in the figure?
+
+```{r echo=FALSE}
+fviz_pca_ind(pca_result)
+```
+
+The graph shows a quite nice spacial differentiation when the PC1 is being considered. A considerable amount of observations can easily be distinguished from the other. PC2 doesn't seem to be that influential.
+
+## Which individual features can matter the most in separating diseased from healthy? 
+
+```{r echo=FALSE}
+# PC1 - retrieve the most important variables
+PC1_important_vars <- head(sort(abs(pca_result$rotation[,1]), decreasing = TRUE),2)
+
+# V502 and V589
+
+genes %>%
+  ggplot(aes( x = V502, y = V589)) +
+  geom_point()
+
+cor_var <- cor(genes$V502, genes$V589 , method = c("pearson", "kendall", "spearman"))
+
+```
+
+The most important variables seems to be correlated to each other demonstrating a quite linear correlation pattern with a higher coefficient (0.78). Those variables might worth a more well detailed analysis.
